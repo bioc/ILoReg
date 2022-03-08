@@ -135,6 +135,10 @@ setMethod("PrepareILoReg", signature(object = "SingleCellExperiment"),
 #' (threads) to use in parallel computation.
 #' Set \code{1} to disable parallelism altogether or \code{0} to use all
 #' available threas except one. Default is \code{0}.
+#' @param icp.batch.size A positive integer that specifies how many cells 
+#' to randomly select for each ICP run from the complete data set. 
+#' This is a new feature intended to speed up the process
+#' with larger data sets. Default is \code{Inf}, which means using all cells.
 #'
 #' @name RunParallelICP
 #'
@@ -164,7 +168,7 @@ setMethod("PrepareILoReg", signature(object = "SingleCellExperiment"),
 #'
 RunParallelICP.SingleCellExperiment <- function(object, k, d, L, r, C,
                                                 reg.type, max.iter,
-                                                threads){
+                                                threads,icp.batch.size){
 
   if (!is(object,"SingleCellExperiment")) {
     stop("object must of 'sce' class")
@@ -226,6 +230,21 @@ RunParallelICP.SingleCellExperiment <- function(object, k, d, L, r, C,
   } else {
     metadata(object)$iloreg$threads <- threads
   }
+  
+  
+
+  if (!is.infinite(icp.batch.size))
+  {
+    if (!is.numeric(icp.batch.size) | icp.batch.size <= 2 | icp.batch.size%%1 != 0)
+    {
+      stop("icp.batch.size must be a positive integer > 2 or Inf (0 = use all cells in ICP)")
+    } else {
+      metadata(object)$iloreg$icp.batch.size <- icp.batch.size
+    }
+    
+  }
+  
+  
 
   parallelism <- TRUE
 
@@ -257,7 +276,8 @@ RunParallelICP.SingleCellExperiment <- function(object, k, d, L, r, C,
                    .options.snow = opts)  %dorng% {
                      try({
                        RunICP(normalized.data = dataset, k = k, d = d, r = r,
-                              C = C, reg.type = reg.type, max.iter = max.iter)
+                              C = C, reg.type = reg.type, max.iter = max.iter,
+                              icp.batch.size=icp.batch.size)
                      })
                    }
     close(pb)
@@ -268,14 +288,22 @@ RunParallelICP.SingleCellExperiment <- function(object, k, d, L, r, C,
     out <- list()
     for (l in seq_len(L)) {
       try({
+        message(paste0("ICP run: ",l))
         res <- RunICP(normalized.data = dataset, k = k, d = d, r = r,
-                      C = C, reg.type = reg.type, max.iter = max.iter)
+                      C = C, reg.type = reg.type, max.iter = max.iter,
+                      icp.batch.size=icp.batch.size)
         out[[l]] <- res
       })
     }
   }
   metadata(object)$iloreg$joint.probability <-
     lapply(out,function(x) x$probabilities)
+  
+  sds <- unlist(lapply(metadata(object)$iloreg$joint.probability,sd))
+  
+  metadata(object)$iloreg$joint.probability <-
+    metadata(object)$iloreg$joint.probability[order(sds)]
+  
   metadata(object)$iloreg$metrics <-
     lapply(out,function(x) x$metrics)
 
@@ -1265,8 +1293,7 @@ setMethod("ClusteringScatterPlot", signature(object = "SingleCellExperiment"),
 #' @param test Which test to use. Only "wilcoxon" (the Wilcoxon rank-sum test,
 #' AKA Mann-Whitney U test) is supported at the moment.
 #' @param log2fc.threshold Filters out genes that have log2 fold-change of the
-#' averaged gene expression values (with the pseudo-count value added to the
-#' averaged values before division if pseudocount.use > 0) below this threshold.
+#' averaged gene expression values below this threshold.
 #' Default is \code{0.25}.
 #' @param min.pct Filters out genes that have dropout rate (fraction of cells
 #' expressing a gene) below this threshold in both comparison groups
@@ -1281,9 +1308,6 @@ setMethod("ClusteringScatterPlot", signature(object = "SingleCellExperiment"),
 #' @param max.cells.per.cluster The maximun number of cells per cluster if
 #' downsampling is performed to speed up the DE analysis.
 #' Default is \code{NULL}, i.e. no downsampling.
-#' @param pseudocount.use A positive integer, which is added to
-#' the average gene expression values before calculating the fold-change,
-#' assuring that no divisions by zero occur. Default is \code{1}.
 #' @param return.thresh If only.pos=TRUE, then return only genes that have the
 #' adjusted p-value (adjusted by the Bonferroni method) below or equal to this
 #' threshold. Default is \code{0.01}.
@@ -1320,7 +1344,6 @@ FindAllGeneMarkers.SingleCellExperiment <- function(object,
                                                     min.diff.pct,
                                                     min.cells.group,
                                                     max.cells.per.cluster,
-                                                    pseudocount.use,
                                                     return.thresh,
                                                     only.pos) {
 
@@ -1422,8 +1445,8 @@ FindAllGeneMarkers.SingleCellExperiment <- function(object,
     cluster_aves <- apply(data_cluster,1,mean)
     other_aves <- apply(data_other,1,mean)
 
-    log2FC <- log2((cluster_aves+pseudocount.use)/(other_aves+pseudocount.use))
-
+    log2FC <- cluster_aves - other_aves
+    
     genes_to_include <- rownames(data_cluster)[log2FC >= log2fc.threshold | log2FC <= -log2fc.threshold]
 
     data_cluster <- data_cluster[genes_to_include,,drop=FALSE]
@@ -1498,8 +1521,7 @@ setMethod("FindAllGeneMarkers", signature(object = "SingleCellExperiment"),
 #' @param test Which test to use. Only "wilcoxon" (the Wilcoxon rank-sum test,
 #' AKA Mann-Whitney U test) is supported at the moment.
 #' @param logfc.threshold Filters out genes that have log2 fold-change of the
-#' averaged gene expression values (with the pseudo-count value added to the
-#' averaged values before division if pseudocount.use > 0) below this threshold.
+#' averaged gene expression values below this threshold.
 #' Default is \code{0.25}.
 #' @param min.pct Filters out genes that have dropout rate (fraction of cells
 #' expressing a gene) below this threshold in both comparison groups
@@ -1514,9 +1536,6 @@ setMethod("FindAllGeneMarkers", signature(object = "SingleCellExperiment"),
 #' @param max.cells.per.cluster The maximun number of cells per cluster
 #' if downsampling is performed to speed up the DE analysis.
 #' Default is \code{NULL}, i.e. no downsampling.
-#' @param pseudocount.use A positive integer, which is added
-#' to the average gene expression values before calculating the fold-change.
-#' This makes sure that no divisions by zero occur. Default is \code{1}.
 #' @param return.thresh If only.pos=TRUE, then return only genes that
 #' have the adjusted p-value (adjusted by the Bonferroni method) below or
 #' equal to this threshold.  Default is \code{0.01}.
@@ -1556,7 +1575,6 @@ FindGeneMarkers.SingleCellExperiment <- function(object,
                                                  min.diff.pct,
                                                  min.cells.group,
                                                  max.cells.per.cluster,
-                                                 pseudocount.use,
                                                  return.thresh,
                                                  only.pos) {
 
@@ -1683,7 +1701,7 @@ FindGeneMarkers.SingleCellExperiment <- function(object,
   cluster_aves <- apply(data_cluster,1,mean)
   other_aves <- apply(data_other,1,mean)
 
-  log2FC <- log2((cluster_aves+pseudocount.use)/(other_aves+pseudocount.use))
+  log2FC <- cluster_aves - other_aves
 
   genes_to_include <- rownames(data_cluster)[log2FC >= logfc.threshold | log2FC <= -logfc.threshold]
 

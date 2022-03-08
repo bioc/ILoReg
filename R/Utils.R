@@ -44,7 +44,11 @@
 #' @param reg.type "L1" for LASSO and "L2" for Ridge. Default is "L1".
 #' @param max.iter A positive integer that denotes the maximum number of
 #' iterations performed until the algorithm ends. Default is \code{200}.
-#'
+#' @param icp.batch.size A positive integer that specifies how many cells 
+#' to randomly select for each ICP run from the complete data set. 
+#' This is a new feature intended to speed up the process
+#' with larger data sets. Default is \code{Inf}, which means using all cells.
+
 #' @return A list that includes the probability matrix and the clustering
 #' similarity measures: ARI, NMI, etc.
 #'
@@ -57,13 +61,22 @@
 #'
 #'
 RunICP <- function(normalized.data = NULL,k = 15, d = 0.3, r = 5, C = 5,
-                   reg.type = "L1", max.iter = 200) {
+                   reg.type = "L1", max.iter = 200,icp.batch.size=Inf) {
 
   first_round <- TRUE
   metrics <- NULL
   idents <- list()
   iterations <- 1
   probs <- NULL
+  
+  
+  if ((!is.infinite(icp.batch.size)) & icp.batch.size > 2)
+  {
+    normalized_data_whole <- normalized.data
+    randinds_batch <- sample(seq_len(ncol(normalized.data)),
+                             size = icp.batch.size,replace = FALSE)
+    normalized.data <- normalized.data[,randinds_batch]
+  }
 
   while (TRUE) {
 
@@ -88,14 +101,21 @@ RunICP <- function(normalized.data = NULL,k = 15, d = 0.3, r = 5, C = 5,
     # Projected cluster probabilities
     probs <- res$probabilities
 
+    message(paste0("probability matrix dimensions = ",paste(dim(probs),collapse = " ")))
+    
     # Projected clusters
     ident_2 <- res$predictions
 
     # Safety procedure: If k drops to 1, start from the beginning.
     # However, k should NOT decrease during the iteration when
     # the down- and oversampling approach is used for the balancing training data.
-    if (length(levels(factor(as.character(ident_2)))) < 2)
+    if (length(levels(factor(as.character(ident_2)))) < k)
     {
+      message(paste0("k decreased, starting from the beginning... ", 
+                     "consider increasing d to 0.5 and C to 1 ", 
+                     "or increasing the ICP batch size ",
+                     "and check the input data ",
+                     "(scaled dense data might cause problems)"))
       first_round <- TRUE
       metrics <- NULL
       idents <- list()
@@ -104,6 +124,10 @@ RunICP <- function(normalized.data = NULL,k = 15, d = 0.3, r = 5, C = 5,
     }
 
     # Step 3: compare clustering similarity between clustering and projection
+    message(paste0("EPOCH: ",iterations))
+    message(paste0("current clustering = ",paste(table(ident_1),collapse = " ")))
+    message(paste0("projected clustering = ",paste(table(ident_2),collapse = " ")))
+    
     comp_clust <- clustComp(c1 = ident_1, c2 = ident_2)
 
     if(first_round & comp_clust$ARI <= 0)
@@ -119,6 +143,7 @@ RunICP <- function(normalized.data = NULL,k = 15, d = 0.3, r = 5, C = 5,
     # Step 3.2: If ARI increased, proceed to next iteration round
     else {
       # Update clustering to the predicted clusters
+      message(paste0("ARI=",as.character(comp_clust$ARI)))
       ident_1 <- ident_2
       first_round <- FALSE
       metrics <- cbind(metrics,comp_clust)
@@ -135,8 +160,32 @@ RunICP <- function(normalized.data = NULL,k = 15, d = 0.3, r = 5, C = 5,
       break
     }
   }
-  # Step 5: Return result
-  return(list(probabilities=probs, metrics=metrics))
+  if (is.infinite(icp.batch.size))
+  {
+    # Step 5: Return result
+    return(list(probabilities=probs, metrics=metrics))
+    
+  } else {
+    cat("projecting the whole data set...")
+    res <- LogisticRegression(training.sparse.matrix = t(normalized.data),
+                              training.ident = ident_1, C = C,
+                              reg.type=reg.type,
+                              test.sparse.matrix = t(normalized_data_whole), d=d)
+    
+    names(res$predictions) <- colnames(normalized_data_whole)
+    rownames(res$probabilities) <- colnames(normalized_data_whole)
+    
+    # Projected cluster probabilities
+    probs <- res$probabilities
+    
+    message(" success!")
+    
+    
+    message(paste(dim(probs),collapse = " "))
+    
+    return(list(probabilities=probs, metrics=metrics))
+    
+  }
 }
 
 #' @title Down- and oversample data
